@@ -13,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   annualToMonthlyRate,
   calcFreeRepaymentMinPayment,
+  estimateReamortize,
   findRemainingInfo,
 } from '@/core/calculator/LoanCalculator';
 import {
@@ -20,6 +21,8 @@ import {
   LoanMethod,
   PrepaymentMode,
   PrepaymentModeName,
+  ReamortizeTarget,
+  ReamortizeTargetName,
 } from '@/core/types/loan.types';
 import { trackEvent } from '@/core/utils/analytics';
 import { formatDate } from '@/core/utils/formatHelper';
@@ -48,12 +51,17 @@ export function ChangeForm() {
   const [selectedRateTableId, setSelectedRateTableId] = useState('');
   const [applyResult, setApplyResult] = useState('');
 
-  // 提前还款
+  // 提前还款 / 再分期
   const [prepayAmount, setPrepayAmount] = useState('');
   const [prepayDate, setPrepayDate] = useState('');
-  const [prepayMode, setPrepayMode] = useState<PrepaymentMode>(
+  const [processMode, setProcessMode] = useState<PrepaymentMode | 'custom'>(
     PrepaymentMode.ReducePayment,
   );
+  const [reamortizeTarget, setReamortizeTarget] = useState<ReamortizeTarget>(
+    ReamortizeTarget.Term,
+  );
+  const [targetTerm, setTargetTerm] = useState('');
+  const [targetPayment, setTargetPayment] = useState('');
   const [prepayError, setPrepayError] = useState('');
 
   // 调整月供（自由还款）
@@ -90,6 +98,62 @@ export function ChangeForm() {
           ),
         )
       : 0;
+
+  // 再分期上下文：变更日的剩余本金/期数/月利率/当前月供
+  const prepayContext = useMemo(() => {
+    if (schedule.length === 0) return null;
+    const date = prepayDate ? new Date(prepayDate) : new Date();
+    const info = findRemainingInfo(schedule, date);
+    if (!info) return null;
+    const paidRegular = schedule.filter(
+      (i) => i.period > 0 && new Date(i.paymentDate) <= date,
+    );
+    const currentPayment = paidRegular.length
+      ? paidRegular[paidRegular.length - 1].monthlyPayment
+      : 0;
+    return {
+      remainingLoan: info.remainingLoan,
+      remainingTerm: info.remainingTerm,
+      monthlyRate: annualToMonthlyRate(info.annualInterestRate),
+      currentPayment,
+    };
+  }, [schedule, prepayDate]);
+
+  // 自定义再分期的实时预估（与 store 同源，保证所见即所得）
+  const reamortizePreview = useMemo(() => {
+    if (processMode !== 'custom' || !prepayContext || !currentMethod) {
+      return null;
+    }
+    const prepay = Number(prepayAmount) || 0;
+    const postLoan = prepayContext.remainingLoan - prepay;
+    if (postLoan <= 0) return null;
+    if (reamortizeTarget === ReamortizeTarget.Term) {
+      const n = Number(targetTerm);
+      if (!n) return null;
+      return estimateReamortize(
+        postLoan,
+        currentMethod,
+        prepayContext.monthlyRate,
+        { kind: ReamortizeTarget.Term, value: n },
+      );
+    }
+    const x = Number(targetPayment);
+    if (!x) return null;
+    return estimateReamortize(
+      postLoan,
+      currentMethod,
+      prepayContext.monthlyRate,
+      { kind: ReamortizeTarget.Payment, value: x },
+    );
+  }, [
+    processMode,
+    prepayContext,
+    currentMethod,
+    prepayAmount,
+    reamortizeTarget,
+    targetTerm,
+    targetPayment,
+  ]);
 
   const handleApplyRateTable = () => {
     if (!params || !currentMethod) return;
@@ -144,8 +208,16 @@ export function ChangeForm() {
     setPaymentError('');
 
     const paymentNum = Number(newPayment);
-    if (!paymentNum || paymentNum <= 0) {
-      setPaymentError('请输入有效的月供金额');
+    const monthlyRate = annualToMonthlyRate(
+      changes[changes.length - 1]?.annualInterestRate ?? 0,
+    );
+    const currentInterest = paymentRemainingLoan * monthlyRate;
+    const paymentCheck = Validator.targetMonthlyPayment(
+      paymentNum,
+      currentInterest,
+    );
+    if (!paymentCheck.valid) {
+      setPaymentError(paymentCheck.message);
       return;
     }
 
@@ -231,29 +303,104 @@ export function ChangeForm() {
     e.preventDefault();
     setPrepayError('');
 
-    const amountNum = Number(prepayAmount);
-    const amountCheck = Validator.prepayAmount(amountNum, prepayRemainingLoan);
-    if (!amountCheck.valid) {
-      setPrepayError(amountCheck.message);
-      return;
-    }
-
     const dateCheck = Validator.date(prepayDate);
     if (!dateCheck.valid) {
       setPrepayError(dateCheck.message);
       return;
     }
+    if (!prepayContext || !currentMethod) {
+      setPrepayError('无法计算当前剩余信息');
+      return;
+    }
 
-    applyChange({
-      type: ChangeType.Prepayment,
-      date: new Date(prepayDate),
-      loanMethod: currentMethod,
-      prepayAmount: amountNum,
-      prepaymentMode: prepayMode,
-    });
+    // 经典提前还款：减少月供 / 缩短年限（金额必填）
+    if (processMode !== 'custom') {
+      const amountNum = Number(prepayAmount);
+      const amountCheck = Validator.prepayAmount(
+        amountNum,
+        prepayContext.remainingLoan,
+      );
+      if (!amountCheck.valid) {
+        setPrepayError(amountCheck.message);
+        return;
+      }
+      applyChange({
+        type: ChangeType.Prepayment,
+        date: new Date(prepayDate),
+        loanMethod: currentMethod,
+        prepayAmount: amountNum,
+        prepaymentMode: processMode,
+      });
+      setPrepayAmount('');
+      setPrepayDate('');
+      return;
+    }
+
+    // 自定义再分期：金额选填
+    const prepay = Number(prepayAmount) || 0;
+    if (prepayAmount && prepay > 0) {
+      const amtCheck = Validator.prepayAmount(
+        prepay,
+        prepayContext.remainingLoan,
+      );
+      if (!amtCheck.valid) {
+        setPrepayError(amtCheck.message);
+        return;
+      }
+    }
+    const postLoan = prepayContext.remainingLoan - prepay;
+    if (postLoan <= 0) {
+      setPrepayError('还款额已覆盖剩余本金，请改用「减少月供」全部还清');
+      return;
+    }
+
+    if (reamortizeTarget === ReamortizeTarget.Term) {
+      const n = Number(targetTerm);
+      const check = Validator.targetTerm(n, prepayContext.remainingTerm);
+      if (!check.valid) {
+        setPrepayError(check.message);
+        return;
+      }
+      applyChange({
+        type: ChangeType.Reamortize,
+        date: new Date(prepayDate),
+        loanMethod: currentMethod,
+        reamortizeTarget: ReamortizeTarget.Term,
+        targetTerm: n,
+        prepayAmount: prepay > 0 ? prepay : undefined,
+      });
+    } else {
+      const x = Number(targetPayment);
+      const postInterest = postLoan * prepayContext.monthlyRate;
+      const check = Validator.targetMonthlyPayment(x, postInterest);
+      if (!check.valid) {
+        setPrepayError(check.message);
+        return;
+      }
+      const est = estimateReamortize(
+        postLoan,
+        currentMethod,
+        prepayContext.monthlyRate,
+        { kind: ReamortizeTarget.Payment, value: x },
+      );
+      if (!est || est.term >= prepayContext.remainingTerm) {
+        setPrepayError('该月供无法缩短期限，请提高目标月供');
+        return;
+      }
+      applyChange({
+        type: ChangeType.Reamortize,
+        date: new Date(prepayDate),
+        loanMethod: currentMethod,
+        reamortizeTarget: ReamortizeTarget.Payment,
+        targetMonthlyPayment: x,
+        prepayAmount: prepay > 0 ? prepay : undefined,
+      });
+    }
 
     setPrepayAmount('');
     setPrepayDate('');
+    setTargetTerm('');
+    setTargetPayment('');
   };
 
   return (
@@ -276,7 +423,7 @@ export function ChangeForm() {
               </TabsTrigger>
             ) : (
               <TabsTrigger value="prepay" className="flex-1">
-                提前还款
+                提前还款 / 再分期
               </TabsTrigger>
             )}
             <TabsTrigger value="repayDay" className="flex-1">
@@ -349,7 +496,14 @@ export function ChangeForm() {
             <TabsContent value="prepay">
               <form onSubmit={handlePrepay} className="space-y-3 pt-2">
                 <div className="space-y-1">
-                  <Label htmlFor="prepay-amount">还款金额 (元)</Label>
+                  <Label htmlFor="prepay-amount">
+                    还款金额 (元)
+                    {processMode === 'custom' && (
+                      <span className="ml-1 text-xs text-muted-foreground">
+                        选填，仅调整计划可留空
+                      </span>
+                    )}
+                  </Label>
                   <Input
                     id="prepay-amount"
                     type="number"
@@ -371,7 +525,9 @@ export function ChangeForm() {
                   </button>
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="prepay-date">还款日期</Label>
+                  <Label htmlFor="prepay-date">
+                    {processMode === 'custom' ? '生效日期' : '还款日期'}
+                  </Label>
                   <Input
                     id="prepay-date"
                     type="date"
@@ -380,13 +536,17 @@ export function ChangeForm() {
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="prepay-mode">变更方式</Label>
-                  <Select
-                    value={prepayMode}
-                    onValueChange={(v) => setPrepayMode(v as PrepaymentMode)}
+                  <Label htmlFor="process-mode">处理方式</Label>
+                  <Select<PrepaymentMode | 'custom'>
+                    value={processMode}
+                    onValueChange={(v) =>
+                      setProcessMode(v as PrepaymentMode | 'custom')
+                    }
                   >
                     <SelectTrigger>
-                      {PrepaymentModeName[prepayMode]}
+                      {processMode === 'custom'
+                        ? '自定义目标'
+                        : PrepaymentModeName[processMode]}
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value={PrepaymentMode.ReducePayment}>
@@ -395,14 +555,100 @@ export function ChangeForm() {
                       <SelectItem value={PrepaymentMode.ShortenTerm}>
                         缩短年限（月供不变）
                       </SelectItem>
+                      <SelectItem value="custom">自定义目标</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
+
+                {processMode === 'custom' && (
+                  <div className="space-y-3 rounded-md border border-border p-3">
+                    <div className="space-y-1">
+                      <Label htmlFor="reamortize-target">调整目标</Label>
+                      <Select
+                        value={reamortizeTarget}
+                        onValueChange={(v) =>
+                          setReamortizeTarget(v as ReamortizeTarget)
+                        }
+                      >
+                        <SelectTrigger>
+                          {ReamortizeTargetName[reamortizeTarget]}
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={ReamortizeTarget.Term}>
+                            指定剩余期数
+                          </SelectItem>
+                          {currentMethod ===
+                            LoanMethod.EqualPrincipalInterest && (
+                            <SelectItem value={ReamortizeTarget.Payment}>
+                              指定每月还款额
+                            </SelectItem>
+                          )}
+                        </SelectContent>
+                      </Select>
+                      {currentMethod === LoanMethod.EqualPrincipal && (
+                        <p className="text-xs text-muted-foreground">
+                          等额本金月供逐月递减，仅支持按期数调整
+                        </p>
+                      )}
+                    </div>
+
+                    {reamortizeTarget === ReamortizeTarget.Term ? (
+                      <div className="space-y-1">
+                        <Label htmlFor="target-term">目标剩余期数</Label>
+                        <Input
+                          id="target-term"
+                          type="number"
+                          inputMode="numeric"
+                          value={targetTerm}
+                          onChange={(e) => setTargetTerm(e.target.value)}
+                          placeholder={
+                            prepayContext
+                              ? `当前剩余 ${prepayContext.remainingTerm} 期`
+                              : ''
+                          }
+                        />
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <Label htmlFor="target-payment">目标月供 (元)</Label>
+                        <Input
+                          id="target-payment"
+                          type="number"
+                          inputMode="decimal"
+                          value={targetPayment}
+                          onChange={(e) => setTargetPayment(e.target.value)}
+                          placeholder={
+                            prepayContext
+                              ? `当前月供 ${prepayContext.currentPayment.toFixed(2)}`
+                              : ''
+                          }
+                        />
+                      </div>
+                    )}
+
+                    {reamortizePreview && (
+                      <p className="text-sm text-muted-foreground">
+                        {reamortizeTarget === ReamortizeTarget.Term
+                          ? `预估月供约 ${reamortizePreview.monthlyPayment.toFixed(2)} 元${
+                              currentMethod === LoanMethod.EqualPrincipal
+                                ? '（首月，逐月递减）'
+                                : ''
+                            }`
+                          : `预估可缩短至 ${reamortizePreview.term} 期，实际月供约 ${reamortizePreview.monthlyPayment.toFixed(2)} 元`}
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 {prepayError && (
                   <p className="text-sm text-red-500">{prepayError}</p>
                 )}
                 <Button type="submit" className="w-full">
-                  提前还款
+                  {processMode === 'custom'
+                    ? Number(prepayAmount) > 0
+                      ? '提前还款并再分期'
+                      : '重新分期'
+                    : '提前还款'}
                 </Button>
               </form>
             </TabsContent>
