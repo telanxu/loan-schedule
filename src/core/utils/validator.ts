@@ -52,6 +52,34 @@ export const Validator = {
     return ok();
   },
 
+  /** 再分期目标期数：整数、大于 0、小于当前剩余期数 */
+  targetTerm(value: number, currentRemainingTerm: number): ValidationResult {
+    if (Number.isNaN(value) || !Number.isInteger(value))
+      return fail('目标期数必须为整数');
+    if (value < 1) return fail('目标期数必须大于 0');
+    if (value >= currentRemainingTerm)
+      return fail(`目标期数需小于当前剩余 ${currentRemainingTerm} 期`);
+    return ok();
+  },
+
+  /**
+   * 目标月供：必须大于 0 且能覆盖当期利息。
+   * 传入 currentMonthlyPayment 时（再分期"提高至 X"场景）额外要求高于当前月供；
+   * 不传时（自由还款调整月供，允许调低）仅校验覆盖利息。
+   */
+  targetMonthlyPayment(
+    value: number,
+    currentInterest: number,
+    currentMonthlyPayment?: number,
+  ): ValidationResult {
+    if (Number.isNaN(value) || value <= 0) return fail('月供必须大于 0');
+    if (value <= currentInterest)
+      return fail(`月供需大于当期利息 ${currentInterest.toFixed(2)} 元`);
+    if (currentMonthlyPayment != null && value <= currentMonthlyPayment)
+      return fail('目标月供需高于当前月供才能缩短期限');
+    return ok();
+  },
+
   date(value: string): ValidationResult {
     if (!value) return fail('请选择日期');
     const d = new Date(value);

@@ -242,3 +242,85 @@ describe('Validator.date', () => {
     expect(result.valid).toBe(true);
   });
 });
+
+describe('Validator.repaymentDay', () => {
+  it('NaN 返回失败', () => {
+    expect(Validator.repaymentDay(Number.NaN).valid).toBe(false);
+  });
+
+  it('非整数返回失败', () => {
+    const result = Validator.repaymentDay(15.5);
+    expect(result.valid).toBe(false);
+    expect(result.message).toBe('还款日必须为整数');
+  });
+
+  it('超出 1-28 返回失败', () => {
+    expect(Validator.repaymentDay(0).valid).toBe(false);
+    expect(Validator.repaymentDay(29).valid).toBe(false);
+  });
+
+  it('边界 1 和 28 返回成功', () => {
+    expect(Validator.repaymentDay(1).valid).toBe(true);
+    expect(Validator.repaymentDay(28).valid).toBe(true);
+  });
+});
+
+describe('Validator.targetTerm', () => {
+  it('NaN 返回失败', () => {
+    expect(Validator.targetTerm(Number.NaN, 360).valid).toBe(false);
+  });
+
+  it('非整数返回失败', () => {
+    const result = Validator.targetTerm(120.5, 360);
+    expect(result.valid).toBe(false);
+    expect(result.message).toBe('目标期数必须为整数');
+  });
+
+  it('小于 1 返回失败', () => {
+    expect(Validator.targetTerm(0, 360).valid).toBe(false);
+  });
+
+  it('等于当前剩余期数返回失败', () => {
+    const result = Validator.targetTerm(360, 360);
+    expect(result.valid).toBe(false);
+    expect(result.message).toContain('360');
+  });
+
+  it('大于当前剩余期数返回失败', () => {
+    expect(Validator.targetTerm(400, 360).valid).toBe(false);
+  });
+
+  it('小于当前剩余期数返回成功', () => {
+    expect(Validator.targetTerm(240, 360).valid).toBe(true);
+    expect(Validator.targetTerm(1, 360).valid).toBe(true);
+  });
+});
+
+describe('Validator.targetMonthlyPayment', () => {
+  it('NaN 或非正返回失败', () => {
+    expect(Validator.targetMonthlyPayment(Number.NaN, 2000).valid).toBe(false);
+    expect(Validator.targetMonthlyPayment(0, 2000).valid).toBe(false);
+  });
+
+  it('不足以覆盖当期利息返回失败', () => {
+    const result = Validator.targetMonthlyPayment(2000, 2333.33);
+    expect(result.valid).toBe(false);
+    expect(result.message).toContain('当期利息');
+  });
+
+  it('覆盖利息即可（未传当前月供，允许调低）', () => {
+    expect(Validator.targetMonthlyPayment(2500, 2333.33).valid).toBe(true);
+  });
+
+  it('传入当前月供时需高于当前月供', () => {
+    const result = Validator.targetMonthlyPayment(4000, 2333.33, 5000);
+    expect(result.valid).toBe(false);
+    expect(result.message).toContain('高于当前月供');
+  });
+
+  it('高于当前月供且覆盖利息返回成功', () => {
+    expect(Validator.targetMonthlyPayment(6000, 2333.33, 5000).valid).toBe(
+      true,
+    );
+  });
+});
