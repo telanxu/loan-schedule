@@ -9,6 +9,7 @@ import {
   calcTermByFixedPrincipal,
   calcTermByPayment,
   calculateLoan,
+  estimateReamortize,
   findRemainingInfo,
 } from '@/core/calculator/LoanCalculator';
 import {
@@ -23,6 +24,7 @@ import {
   LoanType,
   type PaymentScheduleItem,
   PrepaymentMode,
+  ReamortizeTarget,
 } from '@/core/types/loan.types';
 import { trackEvent } from '@/core/utils/analytics';
 import { addMonths, formatDate, roundTo2 } from '@/core/utils/formatHelper';
@@ -396,6 +398,44 @@ export const useLoanStore = create<LoanState>()(
                 comment += `，期数缩短 ${termDiff} 期`;
               }
             }
+          } else if (changeParams.type === ChangeType.Reamortize) {
+            // 再分期：按目标期数或目标月供重算计划，提前还款金额为可选叠加项
+            const prepay = changeParams.prepayAmount ?? 0;
+            remainingLoan = remaining.remainingLoan - prepay;
+
+            if (prepay > 0 && deltaDay > 0) {
+              extraInterest =
+                (((prepay * remaining.annualInterestRate) / 100 / 12) *
+                  deltaDay) /
+                30;
+            }
+
+            const reamortizeRate = annualToMonthlyRate(annualRate);
+            const est =
+              changeParams.reamortizeTarget === ReamortizeTarget.Payment
+                ? estimateReamortize(remainingLoan, method, reamortizeRate, {
+                    kind: ReamortizeTarget.Payment,
+                    value: changeParams.targetMonthlyPayment ?? 0,
+                  })
+                : estimateReamortize(remainingLoan, method, reamortizeRate, {
+                    kind: ReamortizeTarget.Term,
+                    value: changeParams.targetTerm ?? 0,
+                  });
+
+            const parts: string[] = [];
+            if (prepay > 0) parts.push(`提前还款 ${prepay} 元`);
+            if (est != null && est.term > 0) {
+              const termDiff = remainingTerm - est.term;
+              remainingTerm = est.term;
+              parts.push(
+                changeParams.reamortizeTarget === ReamortizeTarget.Payment
+                  ? `按目标月供重算为 ${est.term} 期`
+                  : `期数调整为 ${est.term} 期`,
+              );
+              if (termDiff > 0) parts.push(`缩短 ${termDiff} 期`);
+              else if (termDiff < 0) parts.push(`延长 ${-termDiff} 期`);
+            }
+            comment = parts.length > 0 ? parts.join('，') : '再分期';
           } else if (
             changeParams.type === ChangeType.PaymentChange &&
             changeParams.newMonthlyPayment != null
@@ -544,15 +584,20 @@ export const useLoanStore = create<LoanState>()(
           const oldSchedule = state.schedule.slice(0, remaining.paidPeriods);
           let newSchedule: PaymentScheduleItem[];
 
-          if (
-            changeParams.type === ChangeType.Prepayment &&
-            changeParams.prepayAmount != null
-          ) {
+          // 提前还款 / 带提前还款的再分期：插入一条 period=0 的还款行
+          const usePrepayRow =
+            (changeParams.type === ChangeType.Prepayment ||
+              changeParams.type === ChangeType.Reamortize) &&
+            changeParams.prepayAmount != null &&
+            changeParams.prepayAmount > 0;
+
+          if (usePrepayRow) {
+            const prepayAmt = changeParams.prepayAmount ?? 0;
             const prepayItem: PaymentScheduleItem = {
               period: 0,
               paymentDate: dateStr,
-              monthlyPayment: changeParams.prepayAmount + extraInterest,
-              principal: changeParams.prepayAmount,
+              monthlyPayment: prepayAmt + extraInterest,
+              principal: prepayAmt,
               interest: extraInterest,
               remainingLoan: Math.max(remainingLoan, 0),
               remainingTerm,
@@ -666,6 +711,14 @@ export const useLoanStore = create<LoanState>()(
                 changeParams.prepaymentMode === PrepaymentMode.ReducePayment
                   ? 'reduce_payment'
                   : 'shorten_term',
+            });
+          } else if (changeParams.type === ChangeType.Reamortize) {
+            trackEvent('reamortize_applied', {
+              target:
+                changeParams.reamortizeTarget === ReamortizeTarget.Payment
+                  ? 'payment'
+                  : 'term',
+              has_prepay: (changeParams.prepayAmount ?? 0) > 0,
             });
           } else if (changeParams.type === ChangeType.PaymentChange) {
             trackEvent('payment_adjusted', {
