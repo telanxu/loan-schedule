@@ -13,6 +13,7 @@ import type {
   LoanParameters,
   PaymentScheduleItem,
 } from '@/core/types/loan.types';
+import { LoanMethod } from '@/core/types/loan.types';
 import { useCombinedLoan } from '@/hooks/useCombinedLoan';
 import { useLoanStore } from '@/stores/useLoanStore';
 import { OpportunityCost } from './components/OpportunityCost';
@@ -246,6 +247,9 @@ export function SimulatePage() {
               remainingLoan={remainingLoan}
               defaultStartPeriod={defaultPeriod}
               defaultLumpSumPeriod={defaultPeriod}
+              loanMethod={
+                formParams?.loanMethod ?? LoanMethod.EqualPrincipalInterest
+              }
             />
           </div>
 

@@ -14,13 +14,21 @@ import {
 } from '@/core/types/loan.types';
 import { addMonths, formatDate, roundTo2 } from '@/core/utils/formatHelper';
 
+export type LumpSumStrategy =
+  | 'reduce-payment'
+  | 'shorten-term'
+  | 'custom-term'
+  | 'custom-payment';
+
 export interface SimulateInput {
   mode: 'adjust-monthly' | 'lump-sum';
   newMonthly?: number; // 新月还款额（绝对值）
   startPeriod?: number;
   lumpSumAmount?: number;
   lumpSumPeriod?: number;
-  lumpSumStrategy?: 'reduce-payment' | 'shorten-term';
+  lumpSumStrategy?: LumpSumStrategy;
+  lumpSumTargetTerm?: number; // custom-term：目标剩余期数
+  lumpSumTargetPayment?: number; // custom-payment：目标月供
   investmentRate: number; // 理财年化收益率，如 2.5 表示 2.5%
   observationMonths?: number; // 机会成本观察期（月），undefined=到原贷款到期
 }
@@ -455,9 +463,11 @@ function simulateLumpSum(
   params: LoanParameters,
   lumpSumAmount: number,
   lumpSumPeriod: number,
-  strategy: 'reduce-payment' | 'shorten-term',
+  strategy: LumpSumStrategy,
   investmentRate: number,
   observationOverride?: number,
+  targetTerm?: number,
+  targetPayment?: number,
 ): SimulateResult {
   const regularItems = getRegularItems(schedule);
   const periodMap = new Map(regularItems.map((item) => [item.period, item]));
@@ -532,6 +542,31 @@ function simulateLumpSum(
       );
       remainingTerm = Math.ceil(newRemainingLoan / fixedPrincipal);
     }
+  } else if (strategy === 'custom-term') {
+    if (!targetTerm || targetTerm <= 0) {
+      return buildErrorResult(schedule, investmentRate, '请输入目标期数');
+    }
+    remainingTerm = targetTerm;
+  } else if (strategy === 'custom-payment') {
+    if (method !== LoanMethod.EqualPrincipalInterest) {
+      return buildErrorResult(schedule, investmentRate, '按月供仅支持等额本息');
+    }
+    if (!targetPayment || targetPayment <= 0) {
+      return buildErrorResult(schedule, investmentRate, '请输入目标月供');
+    }
+    const newTerm = calcTermByPayment(
+      newRemainingLoan,
+      targetPayment,
+      monthlyRate,
+    );
+    if (newTerm == null) {
+      return buildErrorResult(
+        schedule,
+        investmentRate,
+        '目标月供不足以覆盖利息',
+      );
+    }
+    remainingTerm = newTerm;
   }
 
   const result = calculateLoan(
@@ -551,7 +586,12 @@ function simulateLumpSum(
     item.period += lumpSumPeriod;
   }
 
-  if (strategy === 'reduce-payment' && result.schedule.length > 0) {
+  if (
+    (strategy === 'reduce-payment' ||
+      strategy === 'custom-term' ||
+      strategy === 'custom-payment') &&
+    result.schedule.length > 0
+  ) {
     newMonthlyPayment = result.schedule[0].monthlyPayment;
   }
 
@@ -630,6 +670,8 @@ export function useSimulation(
       strategy,
       input.investmentRate,
       input.observationMonths,
+      input.lumpSumTargetTerm,
+      input.lumpSumTargetPayment,
     );
   }, [
     schedule,
@@ -640,6 +682,8 @@ export function useSimulation(
     input.lumpSumAmount,
     input.lumpSumPeriod,
     input.lumpSumStrategy,
+    input.lumpSumTargetTerm,
+    input.lumpSumTargetPayment,
     input.investmentRate,
     input.observationMonths,
   ]);

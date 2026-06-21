@@ -248,7 +248,11 @@ function useAnalysisMatrix(
 ): AnalysisMatrix {
   return useMemo(() => {
     const isLumpSum = input.mode === 'lump-sum';
-    const strategy = input.lumpSumStrategy ?? 'shorten-term';
+    // 智能分析按金额扫描推荐，自定义目标不适用，归入"缩短年限"分析口径
+    const strategy =
+      input.lumpSumStrategy === 'reduce-payment'
+        ? 'reduce-payment'
+        : 'shorten-term';
     const userPeriod = isLumpSum
       ? (input.lumpSumPeriod ?? 1)
       : (input.startPeriod ?? 1);

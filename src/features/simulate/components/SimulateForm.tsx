@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import type { PaymentScheduleItem } from '@/core/types/loan.types';
+import { LoanMethod } from '@/core/types/loan.types';
 import { trackEvent } from '@/core/utils/analytics';
 import { roundTo2 } from '@/core/utils/formatHelper';
-import type { SimulateInput } from '../useSimulation';
+import type { LumpSumStrategy, SimulateInput } from '../useSimulation';
 
 interface SimulateFormProps {
   input: SimulateInput;
@@ -12,6 +13,7 @@ interface SimulateFormProps {
   remainingLoan: number;
   defaultStartPeriod: number;
   defaultLumpSumPeriod: number;
+  loanMethod: LoanMethod;
 }
 
 const MODE_LABELS = {
@@ -72,6 +74,7 @@ export function SimulateForm({
   remainingLoan,
   defaultStartPeriod,
   defaultLumpSumPeriod,
+  loanMethod,
 }: SimulateFormProps) {
   const regularItems = schedule.filter((s) => s.period > 0);
   const maxPeriod =
@@ -458,29 +461,84 @@ export function SimulateForm({
             </div>
             <div>
               <span className="text-sm text-muted-foreground">处理方式</span>
-              <div className="mt-1 flex gap-2">
+              <div className="mt-1 grid grid-cols-2 gap-2">
                 {(
                   [
                     ['reduce-payment', '减少月供'],
                     ['shorten-term', '缩短年限'],
-                  ] as const
-                ).map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() =>
-                      onChange({ ...input, lumpSumStrategy: value })
-                    }
-                    className={`flex-1 px-3 py-1.5 text-sm rounded-md transition-colors border ${
-                      input.lumpSumStrategy === value
-                        ? 'border-primary bg-primary/10 text-primary'
-                        : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted/50'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
+                    ['custom-term', '缩短至期数'],
+                    ['custom-payment', '提高月供'],
+                  ] as Array<[LumpSumStrategy, string]>
+                )
+                  .filter(
+                    ([value]) =>
+                      value !== 'custom-payment' ||
+                      loanMethod === LoanMethod.EqualPrincipalInterest,
+                  )
+                  .map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() =>
+                        onChange({ ...input, lumpSumStrategy: value })
+                      }
+                      className={`px-3 py-1.5 text-sm rounded-md transition-colors border ${
+                        input.lumpSumStrategy === value
+                          ? 'border-primary bg-primary/10 text-primary'
+                          : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted/50'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
               </div>
+
+              {input.lumpSumStrategy === 'custom-term' && (
+                <div className="mt-2">
+                  <span className="text-sm text-muted-foreground">
+                    目标剩余期数
+                  </span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={input.lumpSumTargetTerm ?? ''}
+                    placeholder="如 240"
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      onChange({
+                        ...input,
+                        lumpSumTargetTerm: v === '' ? undefined : Number(v),
+                      });
+                    }}
+                    className={inputClass}
+                  />
+                </div>
+              )}
+
+              {input.lumpSumStrategy === 'custom-payment' && (
+                <div className="mt-2">
+                  <span className="text-sm text-muted-foreground">
+                    目标月供 (元)
+                  </span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={input.lumpSumTargetPayment ?? ''}
+                    placeholder={`当前 ${currentMonthlyPayment.toFixed(0)}`}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      onChange({
+                        ...input,
+                        lumpSumTargetPayment: v === '' ? undefined : Number(v),
+                      });
+                    }}
+                    className={inputClass}
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    按目标月供估算可缩短到的期数，实际月供约为该值
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         )}
