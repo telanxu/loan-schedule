@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_REPAYMENT_DAY } from '@/constants/app.constants';
 import type { PaymentScheduleItem } from '@/core/types/loan.types';
-import { LoanMethod, LoanMethodName } from '@/core/types/loan.types';
+import {
+  LoanMethod,
+  LoanMethodName,
+  ReamortizeTarget,
+} from '@/core/types/loan.types';
 import {
   annualToMonthlyRate,
   calcEqualPrincipalInterest,
@@ -11,6 +15,7 @@ import {
   calcTermByFixedPrincipal,
   calcTermByPayment,
   calculateLoan,
+  estimateReamortize,
   findRemainingInfo,
   generateSchedule,
 } from '../LoanCalculator';
@@ -486,5 +491,123 @@ describe('calculateLoan', () => {
         ) * 100,
       ) / 100;
     expect(result.monthlyPayment).toBe(expected);
+  });
+});
+
+describe('estimateReamortize', () => {
+  const rate = annualToMonthlyRate(3.5);
+
+  it('等额本息按期数：返回目标期数与重算月供', () => {
+    const est = estimateReamortize(
+      800_000,
+      LoanMethod.EqualPrincipalInterest,
+      rate,
+      { kind: ReamortizeTarget.Term, value: 240 },
+    );
+    expect(est).not.toBeNull();
+    expect(est!.term).toBe(240);
+    expect(est!.monthlyPayment).toBeCloseTo(
+      calcEqualPrincipalInterest(800_000, 240, rate),
+      1,
+    );
+  });
+
+  it('等额本息按月供：反算期数，实际月供不超过目标值', () => {
+    const target = 5_000;
+    const est = estimateReamortize(
+      800_000,
+      LoanMethod.EqualPrincipalInterest,
+      rate,
+      { kind: ReamortizeTarget.Payment, value: target },
+    );
+    expect(est).not.toBeNull();
+    expect(est!.term).toBe(calcTermByPayment(800_000, target, rate));
+    // 实际月供 = 用反算出的期数重算，因取整略低于目标
+    expect(est!.monthlyPayment).toBeLessThanOrEqual(target);
+    expect(est!.monthlyPayment).toBeCloseTo(
+      calcEqualPrincipalInterest(800_000, est!.term, rate),
+      1,
+    );
+  });
+
+  it('目标月供不足以覆盖当期利息：返回 null', () => {
+    const interest = 800_000 * rate; // ≈ 2333
+    const est = estimateReamortize(
+      800_000,
+      LoanMethod.EqualPrincipalInterest,
+      rate,
+      { kind: ReamortizeTarget.Payment, value: Math.floor(interest) },
+    );
+    expect(est).toBeNull();
+  });
+
+  it('零息时按期数退化为本金均摊', () => {
+    const est = estimateReamortize(
+      120_000,
+      LoanMethod.EqualPrincipalInterest,
+      0,
+      { kind: ReamortizeTarget.Term, value: 12 },
+    );
+    expect(est).toEqual({ term: 12, monthlyPayment: 10_000 });
+  });
+
+  it('零息时按月供反算期数不出现 NaN', () => {
+    const est = estimateReamortize(
+      120_000,
+      LoanMethod.EqualPrincipalInterest,
+      0,
+      { kind: ReamortizeTarget.Payment, value: 10_000 },
+    );
+    expect(est).toEqual({ term: 12, monthlyPayment: 10_000 });
+  });
+
+  it('等额本金按期数：返回首月月供（固定本金+当期利息）', () => {
+    const r = 0.003;
+    const est = estimateReamortize(600_000, LoanMethod.EqualPrincipal, r, {
+      kind: ReamortizeTarget.Term,
+      value: 120,
+    });
+    expect(est).not.toBeNull();
+    expect(est!.term).toBe(120);
+    // 600000/120 + 600000*0.003 = 5000 + 1800
+    expect(est!.monthlyPayment).toBeCloseTo(6_800, 2);
+  });
+
+  it('等额本金按月供：不支持，返回 null', () => {
+    const est = estimateReamortize(600_000, LoanMethod.EqualPrincipal, rate, {
+      kind: ReamortizeTarget.Payment,
+      value: 8_000,
+    });
+    expect(est).toBeNull();
+  });
+
+  it('自由还款：按期数与按月供均返回 null', () => {
+    expect(
+      estimateReamortize(600_000, LoanMethod.FreeRepayment, rate, {
+        kind: ReamortizeTarget.Term,
+        value: 120,
+      }),
+    ).toBeNull();
+    expect(
+      estimateReamortize(600_000, LoanMethod.FreeRepayment, rate, {
+        kind: ReamortizeTarget.Payment,
+        value: 8_000,
+      }),
+    ).toBeNull();
+  });
+
+  it('剩余本金或目标值非正：返回 null', () => {
+    expect(
+      estimateReamortize(0, LoanMethod.EqualPrincipalInterest, rate, {
+        kind: ReamortizeTarget.Term,
+        value: 120,
+      }),
+    ).toBeNull();
+    expect(
+      estimateReamortize(600_000, LoanMethod.EqualPrincipalInterest, rate, {
+        kind: ReamortizeTarget.Term,
+        value: 0,
+      }),
+    ).toBeNull();
   });
 });

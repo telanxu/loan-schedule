@@ -4,6 +4,7 @@ import {
   LoanMethodName,
   type LoanScheduleSummary,
   type PaymentScheduleItem,
+  ReamortizeTarget,
   type RemainingScheduleInfo,
 } from '@/core/types/loan.types';
 import { addMonths, formatDate, roundTo2 } from '@/core/utils/formatHelper';
@@ -56,6 +57,8 @@ export function calcEqualPrincipalInterest(
   termMonths: number,
   monthlyRate: number,
 ): number {
+  // 零息/贴息守护：避免 (pow - 1) 为 0 导致除零得 NaN
+  if (monthlyRate === 0) return principal / termMonths;
   const pow = (1 + monthlyRate) ** termMonths;
   return (principal * monthlyRate * pow) / (pow - 1);
 }
@@ -237,6 +240,66 @@ export function calcTermByFixedPrincipal(
   if (remainingLoan <= 0) return 0;
   if (fixedPrincipal <= 0) return null;
   return Math.ceil(remainingLoan / fixedPrincipal);
+}
+
+export interface ReamortizeEstimate {
+  /** 重算后的剩余期数 */
+  term: number;
+  /** 重算后的月供（等额本金为首月月供，逐月递减） */
+  monthlyPayment: number;
+}
+
+/**
+ * 再分期预估：给定（提前还款后的）剩余本金与目标视角，算出剩余期数与月供。
+ * 表单实时预估与 store 提交共用此函数，保证「所见即所得」。
+ * 不支持的组合（自由还款、等额本金按月供）返回 null。
+ */
+export function estimateReamortize(
+  remainingLoan: number,
+  method: LoanMethod,
+  monthlyRate: number,
+  target:
+    | { kind: ReamortizeTarget.Term; value: number }
+    | { kind: ReamortizeTarget.Payment; value: number },
+): ReamortizeEstimate | null {
+  if (remainingLoan <= 0 || target.value <= 0) return null;
+
+  if (target.kind === ReamortizeTarget.Term) {
+    const term = Math.ceil(target.value);
+    if (term <= 0) return null;
+    if (method === LoanMethod.EqualPrincipalInterest) {
+      return {
+        term,
+        monthlyPayment: roundTo2(
+          calcEqualPrincipalInterest(remainingLoan, term, monthlyRate),
+        ),
+      };
+    }
+    if (method === LoanMethod.EqualPrincipal) {
+      // 首月月供 = 固定本金 + 当期利息，后续逐月递减
+      return {
+        term,
+        monthlyPayment: roundTo2(
+          remainingLoan / term + remainingLoan * monthlyRate,
+        ),
+      };
+    }
+    return null; // 自由还款不支持按期数反算
+  }
+
+  // 按月供反算期数：仅等额本息
+  if (method !== LoanMethod.EqualPrincipalInterest) return null;
+  const term =
+    monthlyRate === 0
+      ? Math.ceil(remainingLoan / target.value)
+      : calcTermByPayment(remainingLoan, target.value, monthlyRate);
+  if (term == null || term <= 0) return null;
+  return {
+    term,
+    monthlyPayment: roundTo2(
+      calcEqualPrincipalInterest(remainingLoan, term, monthlyRate),
+    ),
+  };
 }
 
 /** 计算还款计划摘要（总还款、总利息、总本金、总期数） */
