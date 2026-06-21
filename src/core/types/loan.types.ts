@@ -61,8 +61,14 @@ export enum ChangeType {
   MethodChange = 'method-change',
   PaymentChange = 'payment-change',
   RepaymentDayChange = 'repayment-day-change',
+  Reamortize = 'reamortize',
 }
 
+/**
+ * @deprecated 仅保留以兼容旧持久化数据。两个取值等价于 Reamortize 的两个特例：
+ * ReducePayment ≈ 目标期数=当前剩余期数；ShortenTerm ≈ 目标月供=当前月供。
+ * 新功能请使用 ChangeType.Reamortize + ReamortizeTarget。
+ */
 export enum PrepaymentMode {
   ReducePayment = 'reduce-payment',
   ShortenTerm = 'shorten-term',
@@ -73,15 +79,29 @@ export const PrepaymentModeName: Record<PrepaymentMode, string> = {
   [PrepaymentMode.ShortenTerm]: '缩短年限（月供不变）',
 };
 
+/** 再分期的目标视角：按剩余期数 或 按每月还款额 */
+export enum ReamortizeTarget {
+  Term = 'term',
+  Payment = 'payment',
+}
+
+export const ReamortizeTargetName: Record<ReamortizeTarget, string> = {
+  [ReamortizeTarget.Term]: '指定剩余期数',
+  [ReamortizeTarget.Payment]: '指定每月还款额',
+};
+
 export interface LoanChangeParams {
   type: ChangeType;
   date: Date;
   loanMethod: LoanMethod;
   newAnnualRate?: number; // 利率变更时使用
-  prepayAmount?: number; // 提前还款时使用
+  prepayAmount?: number; // 提前还款时使用；再分期时作为可选叠加项
   prepaymentMode?: PrepaymentMode;
   newMonthlyPayment?: number; // 调整月供时使用（自由还款）
   newRepaymentDay?: number; // 变更还款日时使用
+  reamortizeTarget?: ReamortizeTarget; // 再分期目标视角
+  targetTerm?: number; // 再分期：目标剩余期数
+  targetMonthlyPayment?: number; // 再分期：目标每月还款额
 }
 
 export interface RemainingScheduleInfo {
